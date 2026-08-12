@@ -1,0 +1,502 @@
+"""
+FCC STA Tracker - Starter Script
+Monitors Special Temporary Authorization applications for "D-Fend Solutions"
+"""
+
+"""
+FCC STA Tracker - Starter Script (v2)
+Monitors Special Temporary Authorization applications for "D-Fend Solutions"
+"""
+
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+import json
+from playwright.sync_api import sync_playwright
+
+# ============================================================
+# CONFIG
+# ============================================================
+
+APPLICANT_NAME = "D-Fend Solutions"
+DB_PATH = Path("sta_tracker.db")
+SEARCH_URL = "https://apps.fcc.gov/oetcf/els/reports/GenericSearch.cfm"
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+GMAIL_ADDRESS = "robbieb@d-fendsolutions.com"          # ← put your full Gmail address here
+GMAIL_APP_PASSWORD = "atyvvzuuqhxetiyq"  # ← paste the App Password here (no spaces)
+
+# Who should receive the alerts?
+ALERT_RECIPIENTS = [
+    "robbieb@d-fendsolutions.com", # add , back when adding additional emails
+    "dennisa@d-fendsolutions.com",
+    "themist@d-fendsolutions.com",
+    "justinm@d-fendsolutions.com",
+    "clinth@d-fendsolutions.com"
+]
+
+# ============================================================
+# DATABASE
+# ============================================================
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS applications (
+            file_number     TEXT PRIMARY KEY,
+            applicant       TEXT,
+            status          TEXT,
+            call_sign       TEXT,
+            receipt_date    TEXT,
+            grant_date      TEXT,
+            expiration_date TEXT,
+            city            TEXT,
+            state           TEXT,
+            application_seq TEXT,
+            last_seen       TEXT,
+            first_seen      TEXT,
+            raw_data        TEXT
+        )
+    """)
+
+    # Add columns if the table already exists from earlier runs
+    try:
+        cur.execute("ALTER TABLE applications ADD COLUMN city TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur.execute("ALTER TABLE applications ADD COLUMN state TEXT")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur.execute("ALTER TABLE applications ADD COLUMN application_seq TEXT")
+    except sqlite3.OperationalError:
+        pass
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS run_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_time TEXT,
+            records_found INTEGER,
+            notes TEXT
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+    print(f"Database ready: {DB_PATH.absolute()}")
+
+
+def load_previous_state() -> dict:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    # Order by receipt_date descending (newest first)
+    rows = conn.execute("""
+            SELECT * FROM applications
+            ORDER BY 
+                CASE 
+                    WHEN receipt_date = '' OR receipt_date IS NULL THEN '0000-00-00'
+                    ELSE substr(receipt_date, 7, 4) || '-' || substr(receipt_date, 1, 2) || '-' || substr(receipt_date, 4, 2)
+                END DESC
+        """).fetchall()
+    conn.close()
+    return {row["file_number"]: dict(row) for row in rows}
+
+
+def save_state(records: list[dict]):
+    now = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    for rec in records:
+        file_number = rec.get("file_number")
+        if not file_number:
+            continue
+
+        cur.execute("SELECT first_seen FROM applications WHERE file_number = ?", (file_number,))
+        existing = cur.fetchone()
+        first_seen = existing[0] if existing else now
+
+        cur.execute("""
+            INSERT INTO applications (
+                file_number, applicant, status, call_sign,
+                receipt_date, grant_date, expiration_date,
+                city, state, application_seq,
+                last_seen, first_seen, raw_data
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(file_number) DO UPDATE SET
+                status = excluded.status,
+                call_sign = excluded.call_sign,
+                receipt_date = excluded.receipt_date,
+                grant_date = excluded.grant_date,
+                expiration_date = excluded.expiration_date,
+                city = COALESCE(excluded.city, applications.city),
+                state = COALESCE(excluded.state, applications.state),
+                application_seq = excluded.application_seq,
+                last_seen = excluded.last_seen,
+                raw_data = excluded.raw_data
+        """, (
+            file_number,
+            rec.get("applicant", APPLICANT_NAME),
+            rec.get("status", "Unknown"),
+            rec.get("call_sign", ""),
+            rec.get("receipt_date", ""),
+            rec.get("grant_date", ""),
+            rec.get("expiration_date", ""),
+            rec.get("city", ""),
+            rec.get("state", ""),
+            rec.get("application_seq", ""),
+            now,
+            first_seen,
+            json.dumps(rec),
+        ))
+
+    conn.commit()
+    conn.close()
+    print(f"Saved {len(records)} records.")
+
+# ============================================================
+# FETCH WITH PLAYWRIGHT
+# ============================================================
+
+def fetch_stas(applicant: str = APPLICANT_NAME) -> list[dict]:
+    print(f"Launching browser and searching for '{applicant}'...")
+    records = []
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = context.new_page()
+
+        try:
+            print("1. Opening search page...")
+            page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=60000)
+            print("   Page loaded.")
+
+            # Fill Applicant Name
+            page.fill('input[name="name_licensee"]', applicant)
+
+            # Ensure Special Temporary Authority is checked
+            sta = page.locator('input[name="special_temporary_authority"]')
+            if not sta.is_checked():
+                sta.check()
+
+            # ----- Status filters -----
+            # Uncheck "Include all statuses"
+            all_status = page.locator('input[name="all"]')
+            if all_status.is_checked():
+                all_status.uncheck()
+
+            # Check only the statuses we want
+            page.locator('input[name="granted"]').check()
+            page.locator('input[name="pending"]').check()
+            page.locator('input[name="dismissed"]').check()
+            # Leave "expired" unchecked
+
+            # ----- Records per page -----
+            page.fill('input[name="show_records"]', "100")
+
+            print("2. Submitting search (Granted + Pending + Dismissed, 100 records)...")
+            page.click('input[type="submit"][value="Start Search"]')
+            page.wait_for_load_state("domcontentloaded", timeout=90000)
+            print("   Results page loaded.")
+
+            html = page.content()
+            Path("fcc_last_result.html").write_text(html, encoding="utf-8")
+            print("   Saved fcc_last_result.html")
+
+            # ---------- Improved parsing ----------
+            from bs4 import BeautifulSoup
+            import re
+
+            soup = BeautifulSoup(html, "html.parser")
+
+            # Find all data rows
+            rows = soup.select("tr.rowprimary, tr.rowalternate")
+            print(f"3. Found {len(rows)} data rows.")
+
+            for row in rows:
+                # Get all text cells
+                cells = [td.get_text(" ", strip=True) for td in row.find_all("td")]
+
+                # Look for a File Number pattern like 1504-EX-ST-2026
+                file_number = None
+                for cell in cells:
+                    match = re.search(r"\d{4}-EX-[A-Z]{2}-\d{4}", cell)
+                    if match:
+                        file_number = match.group(0)
+                        break
+
+                # Also try to pull it from links if not found in text
+                if not file_number:
+                    for a in row.find_all("a", href=True):
+                        match = re.search(r"id_file_num=([^&]+)", a["href"])
+                        if match:
+                            file_number = match.group(1)
+                            break
+
+                if not file_number:
+                    continue
+
+                # Status is usually a short word near the end
+                status = "Unknown"
+                for cell in reversed(cells):
+                    cell_lower = cell.lower()
+                    if cell_lower in ("pending", "granted", "denied/dismissed", "expired",
+                                      "grant expired due to new license", "dismissed"):
+                        status = cell
+                        break
+                    if "pending" in cell_lower:
+                        status = "Pending"
+                        break
+                    if "granted" in cell_lower and "expired" not in cell_lower:
+                        status = "Granted"
+                        break
+
+                # Receipt / Status date – look for MM/DD/YYYY
+                dates = re.findall(r"\d{2}/\d{2}/\d{4}", " ".join(cells))
+                receipt_date = dates[0] if dates else ""
+                status_date = dates[-1] if len(dates) > 1 else (dates[0] if dates else "")
+
+                # Extract application_seq from the "Initial" or "Current" link
+                application_seq = ""
+                for a in row.find_all("a", href=True):
+                    match = re.search(r"application_seq=(\d+)", a["href"])
+                    if match:
+                        application_seq = match.group(1)
+                        break
+
+                record = {
+                    "file_number": file_number,
+                    "status": status,
+                    "applicant": applicant,
+                    "call_sign": "",
+                    "receipt_date": receipt_date,
+                    "grant_date": status_date if status.lower() == "granted" else "",
+                    "expiration_date": "",
+                    "city": "",
+                    "state": "",
+                    "application_seq": application_seq,
+                    "raw_row": " | ".join(cells[:12]),  # keep a sample for debugging
+                }
+                records.append(record)
+
+            print(f"4. Successfully parsed {len(records)} records.")
+
+            # Quick preview
+            for r in records[:len(records)]:
+                print(f"   → {r['file_number']}  |  {r['receipt_date']}   |  {r['status']}   |  {r['grant_date']}")
+
+        except Exception as e:
+            print(f"Error during browser automation: {e}")
+            try:
+                Path("fcc_error_page.html").write_text(page.content(), encoding="utf-8")
+            except Exception:
+                pass
+        finally:
+            browser.close()
+
+    return records
+
+def fetch_station_location(application_seq: str) -> tuple[str, str]:
+    if not application_seq:
+        return "", ""
+
+    url = f"https://apps.fcc.gov/oetcf/els/reports/STA_Print.cfm?mode=initial&application_seq={application_seq}&RequestTimeout=1000"
+    print(f"   Fetching location for application_seq={application_seq}...")
+
+    try:
+        import re
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+
+            fieldset = page.locator('fieldset[title="Station Location"]')
+            if fieldset.count() == 0:
+                print("   → Station Location section not found")
+                browser.close()
+                return "", ""
+
+            cells = fieldset.locator("td").all_inner_texts()
+            cleaned = [" ".join(c.split()).strip() for c in cells]
+
+            city = ""
+            state = ""
+
+            if len(cleaned) >= 3:
+                candidate_city = cleaned[1]
+                candidate_state = cleaned[2]
+
+                # Only reject if it looks like a coordinate or frequency
+                coord_or_freq = r"(\d+\.\d+|GHz|MHz|°|North\s+\d|South\s+\d|East\s+\d|West\s+\d|Within\s+\d|NAD\s*83)"
+
+                if candidate_city and not re.search(coord_or_freq, candidate_city, re.IGNORECASE):
+                    city = candidate_city
+
+                if candidate_state and not re.search(coord_or_freq, candidate_state, re.IGNORECASE):
+                    state = candidate_state
+
+            browser.close()
+
+            if city or state:
+                print(f"   → Found: '{city}', '{state}'")
+                return city, state
+            else:
+                print("   → Both City and State missing / invalid → storing as empty")
+                return "", ""
+
+    except Exception as e:
+        print(f"   → Error fetching location: {e}")
+        return "", ""
+
+# ============================================================
+# CHANGE DETECTION + EMAIL EMPLOYEES
+# ============================================================
+
+def detect_changes(old: dict, new_records: list[dict]) -> list[tuple]:
+    alerts = []
+    new_dict = {r["file_number"]: r for r in new_records if r.get("file_number")}
+    for fn, rec in new_dict.items():
+        if fn not in old:
+            alerts.append(("new", rec))
+        else:
+            old_status = (old[fn].get("status") or "").lower()
+            new_status = (rec.get("status") or "").lower()
+            if old_status == "pending" and new_status == "granted":
+                alerts.append(("granted", rec))
+    return alerts
+
+
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+def send_email(subject: str, body: str, recipients: list[str] | None = None):
+    """Send a real email via Gmail."""
+    if recipients is None:
+        recipients = ALERT_RECIPIENTS
+
+    if not recipients:
+        print("No recipients configured – email not sent.")
+        return
+
+    msg = MIMEMultipart()
+    msg["From"] = GMAIL_ADDRESS
+    msg["To"] = ", ".join(recipients)
+    msg["Subject"] = subject
+
+    msg.attach(MIMEText(body, "plain"))
+
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+            server.send_message(msg)
+        print(f"Email sent → {subject}")
+    except Exception as e:
+        print(f"Failed to send email: {e}")
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+    print(f"\n=== FCC STA Checker started at {datetime.now()} ===\n")
+    init_db()
+
+    previous = load_previous_state()
+    print(f"Loaded {len(previous)} previously known applications.")
+
+    current_records = fetch_stas()
+
+    # Enrich records with City/State
+    for rec in current_records:
+        status_lower = (rec.get("status") or "").lower()
+        if status_lower in ("pending", "granted", "denied/dismissed") and rec.get("application_seq"):
+            # Only fetch if we don't already have the location stored
+            existing = previous.get(rec["file_number"], {})
+            if not existing.get("city"):
+                city, state = fetch_station_location(rec["application_seq"])
+                rec["city"] = city
+                rec["state"] = state
+
+    if not current_records:
+        print("No records returned.")
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "INSERT INTO run_log (run_time, records_found, notes) VALUES (?, ?, ?)",
+            (datetime.now(timezone.utc).isoformat(), 0, "No records")
+        )
+        conn.commit()
+        conn.close()
+        return
+
+    alerts = detect_changes(previous, current_records)
+    for event_type, rec in alerts:
+        file_number = rec.get("file_number", "Unknown")
+        status = rec.get("status", "Unknown")
+        city = rec.get("city") or "N/A"
+        state = rec.get("state") or "N/A"
+        receipt = rec.get("receipt_date") or "N/A"
+        grant_date = rec.get("grant_date") or "N/A"
+        app_seq = rec.get("application_seq") or ""
+
+        # Build direct link to the STA detail page
+        if app_seq:
+            detail_link = f"https://apps.fcc.gov/oetcf/els/reports/STA_Print.cfm?mode=initial&application_seq={app_seq}&RequestTimeout=1000"
+        else:
+            detail_link = "https://apps.fcc.gov/oetcf/els/reports/GenericSearch.cfm"
+
+        if event_type == "granted":
+            subject = f"STA GRANTED: {file_number}"
+            body = f"""A Special Temporary Authorization has been GRANTED.
+
+    File Number: {file_number}
+    Status: {status}
+    Applicant: {rec.get('applicant', 'D-Fend Solutions')}
+    City: {city}
+    State: {state}
+    Receipt Date: {receipt}
+    Grant Date: {grant_date}
+
+    Direct link to STA details:
+    {detail_link}
+    """
+            send_email(subject, body)
+
+        elif event_type == "new":
+            subject = f"New STA filed: {file_number}"
+            body = f"""A new STA application has been detected.
+
+    File Number: {file_number}
+    Status: {status}
+    Applicant: {rec.get('applicant', 'D-Fend Solutions')}
+    City: {city}
+    State: {state}
+    Receipt Date: {receipt}
+
+    Direct link to STA details:
+    {detail_link}
+    """
+            send_email(subject, body)
+
+    save_state(current_records)
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO run_log (run_time, records_found, notes) VALUES (?, ?, ?)",
+        (datetime.now(timezone.utc).isoformat(), len(current_records), f"{len(alerts)} alerts")
+    )
+    conn.commit()
+    conn.close()
+
+    print(f"\n=== Finished. {len(alerts)} alert(s). ===\n")
+
+if __name__ == "__main__":
+    main()

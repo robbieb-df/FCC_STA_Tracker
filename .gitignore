@@ -1,0 +1,14 @@
+﻿# PyCharm
+.idea/
+*.iml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Project specific
+sta_tracker.db
+fcc_*.html
+*.log
