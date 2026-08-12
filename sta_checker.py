@@ -15,25 +15,20 @@ import json
 from playwright.sync_api import sync_playwright
 
 # ============================================================
-# CONFIG
+# EMAIL CONFIG
 # ============================================================
-
+import os
 APPLICANT_NAME = "D-Fend Solutions"
 DB_PATH = Path("sta_tracker.db")
 SEARCH_URL = "https://apps.fcc.gov/oetcf/els/reports/GenericSearch.cfm"
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
-GMAIL_ADDRESS = "robbieb@d-fendsolutions.com"          # ← put your full Gmail address here
-GMAIL_APP_PASSWORD = "atyvvzuuqhxetiyq"  # ← paste the App Password here (no spaces)
+GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS", "")
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 
-# Who should receive the alerts?
-ALERT_RECIPIENTS = [
-    "robbieb@d-fendsolutions.com", # add , back when adding additional emails
-    "dennisa@d-fendsolutions.com",
-    "themist@d-fendsolutions.com",
-    "justinm@d-fendsolutions.com",
-    "clinth@d-fendsolutions.com"
-]
+# Comma-separated list from the secret, or fallback
+_recipients_raw = os.getenv("ALERT_RECIPIENTS", "")
+ALERT_RECIPIENTS = [r.strip() for r in _recipients_raw.split(",") if r.strip()]
 
 # ============================================================
 # DATABASE
