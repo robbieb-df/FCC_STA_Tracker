@@ -2,8 +2,8 @@ name: FCC STA Checker
 
 on:
   schedule:
-    # Runs at 7:00, 12:00 and 18:00 Eastern (EDT)
-    - cron: '0 11,16,22 * * *'
+    # Runs at 7:00, 12:00, 18:00, and 22:00 Eastern (EDT)
+    - cron: '0 11,16,22,02 * * *'
   workflow_dispatch:   # Allows manual runs from the Actions tab
 
 jobs:
