@@ -503,6 +503,18 @@ def build_weekly_summary() -> str:
     lines.append(f"Report generated: {today.strftime('%Y-%m-%d')}")
     return "\n".join(lines)
 
+def send_weekly_summary_if_monday():
+    """Send the weekly summary only on Mondays."""
+    today = datetime.now(timezone.utc)
+    if today.weekday() == 0:  # Monday
+        summary = build_weekly_summary()
+        send_email(
+            subject="FCC STA Weekly Summary – D-Fend Solutions",
+            body=summary
+        )
+        print("Weekly summary email sent.")
+    else:
+        print("Not Monday – skipping weekly summary.")
 
 # ============================================================
 # MAIN
@@ -598,19 +610,7 @@ def main():
     conn.commit()
     conn.close()
 
-    def send_weekly_summary_if_monday():
-        """Send the weekly summary only on Mondays."""
-        today = datetime.now(timezone.utc)
-        if today.weekday() == 0:  # Monday
-            summary = build_weekly_summary()
-            send_email(
-                subject="FCC STA Weekly Summary – D-Fend Solutions",
-                body=summary
-            )
-            print("Weekly summary email sent.")
-        else:
-            print("Not Monday – skipping weekly summary.")
-
+    # Weekly summary (only on Mondays)
     send_weekly_summary_if_monday()
 
     print(f"\n=== Finished. {len(alerts)} alert(s). ===\n")
