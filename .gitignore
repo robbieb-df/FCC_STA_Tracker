@@ -8,7 +8,7 @@ __pycache__/
 .venv/
 venv/
 
-# Project specific
+# Project files we don't want in Git
 sta_tracker.db
 fcc_*.html
 *.log
