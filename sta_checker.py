@@ -349,6 +349,59 @@ def fetch_station_location(application_seq: str) -> tuple[str, str]:
         print(f"   → Error fetching location: {e}")
         return "", ""
 
+def fetch_operation_period(application_seq: str) -> tuple[str, str]:
+    if not application_seq:
+        return "", ""
+
+    url = (
+        f"https://apps.fcc.gov/oetcf/els/reports/STA_Print.cfm?mode=initial&application_seq={application_seq}&RequestTimeout=1000"
+    )
+    print(f"   Fetching operation period for application_seq={application_seq}...")
+
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+
+            fieldset = page.locator('fieldset[title="Requested Period of Operation"]')
+
+            if fieldset.count() == 0:
+                print("   → Requested Period of Operation section not found")
+                browser.close()
+                return "", ""
+
+            rows = fieldset.locator("tr")
+
+            sta_start_date = ""
+            sta_expiration_date = ""
+
+            for i in range(rows.count()):
+                texts = rows.nth(i).locator("td").all_inner_texts()
+                texts = [t.strip() for t in texts]
+
+                for j, text in enumerate(texts):
+                    lower = text.lower()
+
+                    if "start date" in lower and j + 1 < len(texts):
+                        sta_start_date = texts[j + 1]
+
+                    if "end date" in lower and j + 1 < len(texts):
+                        sta_expiration_date = texts[j + 1]
+
+            browser.close()
+
+            print(f"   → Found: Start='{sta_start_date}', End='{sta_expiration_date}'")
+            return sta_start_date, sta_expiration_date
+
+    except Exception as e:
+        print(f"   → Error fetching operation period: {e}")
+        return "", ""
+
+
 # ============================================================
 # CHANGE DETECTION + EMAIL EMPLOYEES
 # ============================================================
