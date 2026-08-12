@@ -396,6 +396,113 @@ def send_email(subject: str, body: str, recipients: list[str] | None = None):
     except Exception as e:
         print(f"Failed to send email: {e}")
 
+from datetime import datetime, timedelta, timezone
+from collections import defaultdict
+
+def parse_date(date_str: str):
+    """Parse MM/DD/YYYY → datetime object. Returns None if invalid."""
+    if not date_str or date_str.strip() in ("", "N/A"):
+        return None
+    try:
+        return datetime.strptime(date_str.strip(), "%m/%d/%Y")
+    except ValueError:
+        return None
+
+def build_weekly_summary() -> str:
+    """Build the weekly summary email body from the database."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM applications").fetchall()
+    conn.close()
+
+    today = datetime.now(timezone.utc).date()
+    one_week_ago = today - timedelta(days=7)
+    three_months_from_now = today + timedelta(days=90)
+
+    submitted_last_week = []
+    still_pending = []
+    granted_last_week = []
+    expiring_soon = []
+
+    for row in rows:
+        file_number = row["file_number"]
+        status = (row["status"] or "").strip()
+        city = row["city"] or "N/A"
+        state = row["state"] or "N/A"
+        receipt = parse_date(row["receipt_date"])
+        grant = parse_date(row["grant_date"])
+        expiration = parse_date(row["expiration_date"])
+
+        location = f"{city}, {state}"
+
+        # 1. Submitted last week
+        if receipt and one_week_ago <= receipt.date() <= today:
+            submitted_last_week.append(
+                f"  • {file_number} submitted on {row['receipt_date']} for {location}"
+            )
+
+        # 2. Still Pending
+        if status.lower() == "pending" and receipt:
+            days_pending = (today - receipt.date()).days
+            still_pending.append(
+                (days_pending, f"  • {file_number} submitted on {row['receipt_date']} for {location} ({days_pending} days since submission)")
+            )
+
+        # 3. Granted last week
+        if grant and one_week_ago <= grant.date() <= today:
+            days_to_grant = (grant.date() - receipt.date()).days if receipt else "?"
+            granted_last_week.append(
+                f"  • {file_number} granted on {row['grant_date']} for {location} ({days_to_grant} days after submission)"
+            )
+
+        # 4. Expiring in the next 3 months
+        if expiration and today <= expiration.date() <= three_months_from_now:
+            days_until = (expiration.date() - today).days
+            expiring_soon.append(
+                (days_until, f"  • {file_number} expiring on {row['expiration_date']} for {location} ({days_until} days until expiration)")
+            )
+
+    # Sort pending by oldest first, expiring by soonest first
+    still_pending.sort(key=lambda x: x[0], reverse=True)
+    expiring_soon.sort(key=lambda x: x[0])
+
+    # Build the email body
+    lines = []
+    lines.append("FCC STA Weekly Summary – D-Fend Solutions")
+    lines.append("=" * 50)
+    lines.append("")
+
+    lines.append(f"STA applications submitted last week: {len(submitted_last_week)}")
+    if submitted_last_week:
+        lines.extend(submitted_last_week)
+    else:
+        lines.append("  (none)")
+    lines.append("")
+
+    lines.append(f"STA applications still pending: {len(still_pending)}")
+    if still_pending:
+        lines.extend([item[1] for item in still_pending])
+    else:
+        lines.append("  (none)")
+    lines.append("")
+
+    lines.append(f"STA licenses granted last week: {len(granted_last_week)}")
+    if granted_last_week:
+        lines.extend(granted_last_week)
+    else:
+        lines.append("  (none)")
+    lines.append("")
+
+    lines.append(f"STA licenses expiring in the next 3 months: {len(expiring_soon)}")
+    if expiring_soon:
+        lines.extend([item[1] for item in expiring_soon])
+    else:
+        lines.append("  (none)")
+    lines.append("")
+
+    lines.append(f"Report generated: {today.strftime('%Y-%m-%d')}")
+    return "\n".join(lines)
+
 
 # ============================================================
 # MAIN
@@ -490,6 +597,21 @@ def main():
     )
     conn.commit()
     conn.close()
+
+    def send_weekly_summary_if_monday():
+        """Send the weekly summary only on Mondays."""
+        today = datetime.now(timezone.utc)
+        if today.weekday() == 0:  # Monday
+            summary = build_weekly_summary()
+            send_email(
+                subject="FCC STA Weekly Summary – D-Fend Solutions",
+                body=summary
+            )
+            print("Weekly summary email sent.")
+        else:
+            print("Not Monday – skipping weekly summary.")
+
+    send_weekly_summary_if_monday()
 
     print(f"\n=== Finished. {len(alerts)} alert(s). ===\n")
 
