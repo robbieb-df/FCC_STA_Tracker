@@ -647,6 +647,8 @@ def main():
     State: {state}
     Receipt Date: {receipt}
     Grant Date: {grant_date}
+    Start Date: {rec['sta_start_date']}
+    Expiration Date: {rec['sta_expiration_date']}
 
     Direct link to STA details:
     {detail_link}
