@@ -23,9 +23,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: sta_tracker.db
-          key: sta-db-${{ github.run_id }}
+          key: sta-tracker-db-v1
           restore-keys: |
-            sta-db-
+            sta-tracker-db-v1
 
       - name: Install dependencies
         run: |
