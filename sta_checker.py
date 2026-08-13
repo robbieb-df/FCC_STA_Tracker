@@ -310,11 +310,26 @@ def fetch_stas(applicant: str = APPLICANT_NAME) -> list[dict]:
 
     return records
 
-def fetch_station_location(application_seq: str) -> tuple[str, str]:
-    if not application_seq:
-        return "", ""
+def fetch_sta_details(application_seq: str) -> dict:
+    """
+    Fetch City, State, Operation Start Date, and Operation End Date
+    from the STA detail page in a single browser session.
+    Returns a dict with keys: city, state, sta_start_date, sta_expiration_date
+    """
+    result = {
+        "city": "",
+        "state": "",
+        "sta_start_date": "",
+        "sta_expiration_date": "",
+    }
 
-    url = f"https://apps.fcc.gov/oetcf/els/reports/STA_Print.cfm?mode=initial&application_seq={application_seq}&RequestTimeout=1000"
+    if not application_seq:
+        return result
+
+    url = (
+        f"https://apps.fcc.gov/oetcf/els/reports/STA_Print.cfm"
+        f"?mode=initial&application_seq={application_seq}&RequestTimeout=1000"
+    )
 
     try:
         import re
@@ -323,94 +338,51 @@ def fetch_station_location(application_seq: str) -> tuple[str, str]:
             page = browser.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
-            fieldset = page.locator('fieldset[title="Station Location"]')
-            if fieldset.count() == 0:
-                # print("   → Station Location section not found")
-                browser.close()
-                return "", ""
+            # ----- Station Location (City / State) -----
+            fieldset_loc = page.locator('fieldset[title="Station Location"]')
+            if fieldset_loc.count() > 0:
+                cells = fieldset_loc.locator("td").all_inner_texts()
+                cleaned = [" ".join(c.split()).strip() for c in cells]
 
-            cells = fieldset.locator("td").all_inner_texts()
-            cleaned = [" ".join(c.split()).strip() for c in cells]
+                if len(cleaned) >= 3:
+                    candidate_city = cleaned[1]
+                    candidate_state = cleaned[2]
 
-            city = ""
-            state = ""
+                    coord_or_freq = (
+                        r"(\d+\.\d+|GHz|MHz|°|North\s+\d|South\s+\d|"
+                        r"East\s+\d|West\s+\d|Within\s+\d|NAD\s*83)"
+                    )
 
-            if len(cleaned) >= 3:
-                candidate_city = cleaned[1]
-                candidate_state = cleaned[2]
+                    if candidate_city and not re.search(coord_or_freq, candidate_city, re.IGNORECASE):
+                        result["city"] = candidate_city
+                    if candidate_state and not re.search(coord_or_freq, candidate_state, re.IGNORECASE):
+                        result["state"] = candidate_state
 
-                # Only reject if it looks like a coordinate or frequency
-                coord_or_freq = r"(\d+\.\d+|GHz|MHz|°|North\s+\d|South\s+\d|East\s+\d|West\s+\d|Within\s+\d|NAD\s*83)"
-
-                if candidate_city and not re.search(coord_or_freq, candidate_city, re.IGNORECASE):
-                    city = candidate_city
-
-                if candidate_state and not re.search(coord_or_freq, candidate_state, re.IGNORECASE):
-                    state = candidate_state
-
-            browser.close()
-
-            if city or state:
-                return city, state
-            else:
-                print("   → Both City and State missing / invalid → storing as empty")
-                return "", ""
-
-    except Exception as e:
-        print(f"   → Error fetching location: {e}")
-        return "", ""
-
-def fetch_operation_period(application_seq: str) -> tuple[str, str]:
-    if not application_seq:
-        return "", ""
-
-    url = (
-        f"https://apps.fcc.gov/oetcf/els/reports/STA_Print.cfm?mode=initial&application_seq={application_seq}&RequestTimeout=1000"
-    )
-
-    try:
-        from playwright.sync_api import sync_playwright
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-
-            page.goto(url, wait_until="domcontentloaded", timeout=45000)
-
-            fieldset = page.locator(
+            # ----- Operation Period (Start / End dates) -----
+            fieldset_period = page.locator(
                 'fieldset:has(legend:has-text("Requested Period of Operation"))'
             )
+            if fieldset_period.count() > 0:
+                rows = fieldset_period.locator("tr")
+                for i in range(rows.count()):
+                    cells = rows.nth(i).locator("td").all_inner_texts()
+                    cells = [" ".join(c.split()).strip() for c in cells]
 
-            if fieldset.count() == 0:
-                browser.close()
-                return "", ""
+                    if len(cells) >= 2:
+                        label = cells[0].lower()
+                        value = cells[1]
 
-            sta_start_date = ""
-            sta_expiration_date = ""
-
-            rows = fieldset.locator("tr")
-
-            for i in range(rows.count()):
-                cells = rows.nth(i).locator("td").all_inner_texts()
-                cells = [" ".join(c.split()).strip() for c in cells]
-
-                if len(cells) >= 2:
-                    label = cells[0].lower()
-                    value = cells[1]
-
-                    if "operation start date" in label:
-                        sta_start_date = value
-
-                    elif "operation end date" in label:
-                        sta_expiration_date = value
+                        if "operation start date" in label:
+                            result["sta_start_date"] = value
+                        elif "operation end date" in label:
+                            result["sta_expiration_date"] = value
 
             browser.close()
 
-            return sta_start_date, sta_expiration_date
-
     except Exception as e:
-        print(f"   → Error fetching operation period: {e}")
-        return "", ""
+        print(f"   → Error fetching STA details for {application_seq}: {e}")
+
+    return result
 
 # ============================================================
 # CHANGE DETECTION + EMAIL EMPLOYEES
@@ -593,37 +565,45 @@ def main():
 
     # Enrich records with City/State
     for rec in current_records:
-        status_lower = rec.get("status", "").lower()
+        status_lower = (rec.get("status") or "").lower()
+        app_seq = rec.get("application_seq")
 
-        if status_lower in (
-                "pending",
-                "granted",
-                "denied/dismissed",
-                "dismissed",
-        ) and rec.get("application_seq"):
-            application_seq = rec["application_seq"]
-            print(f"   Fetching details for application_seq={application_seq}...")
+        if not app_seq:
+            continue
 
-            city, state = fetch_station_location(application_seq)
+        if status_lower not in ("pending", "granted", "denied/dismissed", "dismissed"):
+            continue
 
-            sta_start_date, sta_expiration_date = fetch_operation_period(
-                application_seq
-            )
+        existing = previous.get(rec["file_number"], {})
 
-            rec["city"] = city
-            rec["state"] = state
-            rec["sta_start_date"] = sta_start_date
-            rec["sta_expiration_date"] = sta_expiration_date
+        needs_location = not existing.get("city") and not existing.get("state")
+        needs_dates = not existing.get("sta_start_date") and not existing.get("sta_expiration_date")
 
-            print(
-                f"   File Number: '{rec['file_number']}' | "
-                f"Location: '{city}', '{state}' | "
-                f"Submitted: '{rec['receipt_date']}' | "
-                f"Status: '{rec['status']}' | "
-                f"Granted: '{rec['grant_date']}' | "
-                f"Start: '{sta_start_date}' | "
-                f"End: '{sta_expiration_date}'"
-            )
+        if needs_location or needs_dates:
+            print(f"   Fetching details for seq={app_seq}...")
+            details = fetch_sta_details(app_seq)
+
+            rec["city"] = details["city"] or existing.get("city", "")
+            rec["state"] = details["state"] or existing.get("state", "")
+            rec["sta_start_date"] = details["sta_start_date"] or existing.get("sta_start_date", "")
+            rec["sta_expiration_date"] = details["sta_expiration_date"] or existing.get("sta_expiration_date", "")
+        else:
+            # Re-use previously stored values
+            rec["city"] = existing.get("city", "")
+            rec["state"] = existing.get("state", "")
+            rec["sta_start_date"] = existing.get("sta_start_date", "")
+            rec["sta_expiration_date"] = existing.get("sta_expiration_date", "")
+
+        # Keep the original detailed print format
+        print(
+            f"   File Number: '{rec['file_number']}' | "
+            f"Location: '{rec['city']}', '{rec['state']}' | "
+            f"Submitted: '{rec['receipt_date']}' | "
+            f"Status: '{rec['status']}' | "
+            f"Granted: '{rec['grant_date']}' | "
+            f"Start: '{rec['sta_start_date']}' | "
+            f"End: '{rec['sta_expiration_date']}'"
+        )
 
     if not current_records:
         print("No records returned.")
