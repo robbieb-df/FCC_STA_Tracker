@@ -19,13 +19,14 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Cache the SQLite database
-        uses: actions/cache@v4
+      - name: Download previous database (if exists)
+        uses: dawidd6/action-download-artifact@v6
         with:
-          path: sta_tracker.db
-          key: sta-tracker-db-v1
-          restore-keys: |
-            sta-tracker-db-v1
+          name: sta-tracker-db
+          path: .
+          search_artifacts: true
+          if_no_artifact_found: warn
+        continue-on-error: true
 
       - name: Install dependencies
         run: |
@@ -39,3 +40,11 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ALERT_RECIPIENTS: ${{ secrets.ALERT_RECIPIENTS }}
         run: python sta_checker.py
+
+      - name: Upload updated database
+        uses: actions/upload-artifact@v4
+        with:
+          name: sta-tracker-db
+          path: sta_tracker.db
+          retention-days: 30
+          overwrite: true
