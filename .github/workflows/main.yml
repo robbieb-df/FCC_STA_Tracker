@@ -2,9 +2,9 @@ name: FCC STA Checker
 
 on:
   schedule:
-    # Runs at 7:00, 12:00, 18:00, and 22:00 Eastern (EDT)
-    - cron: '0 11,16,22,02 * * *'
-  workflow_dispatch:   # Allows manual runs from the Actions tab
+    # 7:00, 12:00, 18:00 Eastern (EDT)
+    - cron: '0 11,16,22 * * *'
+  workflow_dispatch:
 
 jobs:
   run-checker:
@@ -18,6 +18,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Cache the SQLite database
+        uses: actions/cache@v4
+        with:
+          path: sta_tracker.db
+          key: sta-db-${{ github.run_id }}
+          restore-keys: |
+            sta-db-
 
       - name: Install dependencies
         run: |
