@@ -389,8 +389,27 @@ def fetch_sta_details(application_seq: str) -> dict:
 # ============================================================
 
 def detect_changes(old: dict, new_records: list[dict]) -> list[tuple]:
+    """
+    Detect new applications and Pending → Granted transitions.
+    Safety: if the previous state is empty (first run / missing DB),
+    do not treat everything as "new" to avoid email spam.
+    """
     alerts = []
+
+    # Safety guard – prevent flood on first run or when DB is missing
+    if not old:
+        print("Previous state is empty – suppressing 'new' alerts this run to avoid spam.")
+        # Still detect Pending → Granted in case any exist (rare on first run)
+        new_dict = {r["file_number"]: r for r in new_records if r.get("file_number")}
+        for fn, rec in new_dict.items():
+            new_status = (rec.get("status") or "").lower()
+            if new_status == "granted":
+                # Only alert on granted if we somehow have history, otherwise skip
+                pass
+        return alerts
+
     new_dict = {r["file_number"]: r for r in new_records if r.get("file_number")}
+
     for fn, rec in new_dict.items():
         if fn not in old:
             alerts.append(("new", rec))
@@ -399,6 +418,7 @@ def detect_changes(old: dict, new_records: list[dict]) -> list[tuple]:
             new_status = (rec.get("status") or "").lower()
             if old_status == "pending" and new_status == "granted":
                 alerts.append(("granted", rec))
+
     return alerts
 
 
