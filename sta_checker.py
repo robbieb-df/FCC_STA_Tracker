@@ -390,24 +390,8 @@ def fetch_sta_details(application_seq: str) -> dict:
 
 def detect_changes(old: dict, new_records: list[dict]) -> list[tuple]:
     """
-    Detect new applications and Pending → Granted transitions.
-    Safety: if the previous state is empty (first run / missing DB),
-    do not treat everything as "new" to avoid email spam.
-    """
+    Detect new applications and Pending → Granted transitions. """
     alerts = []
-
-    # Safety guard – prevent flood on first run or when DB is missing
-    if not old:
-        print("Previous state is empty – suppressing 'new' alerts this run to avoid spam.")
-        # Still detect Pending → Granted in case any exist (rare on first run)
-        new_dict = {r["file_number"]: r for r in new_records if r.get("file_number")}
-        for fn, rec in new_dict.items():
-            new_status = (rec.get("status") or "").lower()
-            if new_status == "granted":
-                # Only alert on granted if we somehow have history, otherwise skip
-                pass
-        return alerts
-
     new_dict = {r["file_number"]: r for r in new_records if r.get("file_number")}
 
     for fn, rec in new_dict.items():
@@ -420,7 +404,6 @@ def detect_changes(old: dict, new_records: list[dict]) -> list[tuple]:
                 alerts.append(("granted", rec))
 
     return alerts
-
 
 import smtplib
 from email.mime.text import MIMEText
