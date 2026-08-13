@@ -25,6 +25,7 @@ GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 _recipients_raw = os.getenv("ALERT_RECIPIENTS", "")
 ALERT_RECIPIENTS = [r.strip() for r in _recipients_raw.split(",") if r.strip()]
 
+
 # ============================================================
 # DATABASE
 # ============================================================
