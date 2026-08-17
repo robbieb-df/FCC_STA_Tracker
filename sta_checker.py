@@ -542,9 +542,11 @@ def build_weekly_summary() -> str:
     return "\n".join(lines)
 
 def send_weekly_summary_if_monday():
-    """Send the weekly summary only on Mondays."""
-    today = datetime.now(timezone.utc)
-    if today.weekday() == 0:  # Monday
+    """Send the weekly summary only on Mondays at the first run (~7 AM ET)."""
+    now = datetime.now(timezone.utc)
+
+    # Only run on Monday (weekday == 0) and during the 11:00 UTC hour (7 AM ET)
+    if now.weekday() == 0 and now.hour == 11:
         summary = build_weekly_summary()
         send_email(
             subject="FCC STA Weekly Summary – D-Fend Solutions",
@@ -552,7 +554,7 @@ def send_weekly_summary_if_monday():
         )
         print("Weekly summary email sent.")
     else:
-        print("Not Monday – skipping weekly summary.")
+        print("Not the Monday 7 AM ET run – skipping weekly summary.")
 
 # ============================================================
 # MAIN
