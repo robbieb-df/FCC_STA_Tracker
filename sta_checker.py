@@ -418,6 +418,10 @@ def send_email(subject: str, body: str, recipients: list[str] | None = None) -> 
         print("No recipients configured – email not sent.")
         return False
 
+    if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
+        print("GMAIL_ADDRESS or GMAIL_APP_PASSWORD is missing – email not sent.")
+        return False
+
     msg = MIMEMultipart()
     msg["From"] = GMAIL_ADDRESS
     msg["To"] = ", ".join(recipients)
@@ -432,6 +436,10 @@ def send_email(subject: str, body: str, recipients: list[str] | None = None) -> 
 
         print(f"Email sent → {subject}")
         return True
+
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"Gmail authentication failed (check App Password / 2-Step Verification): {e}")
+        return False
     except Exception as e:
         print(f"Failed to send email: {e}")
         return False
@@ -542,19 +550,31 @@ def build_weekly_summary() -> str:
     return "\n".join(lines)
 
 def send_weekly_summary_if_monday():
-    """Send the weekly summary only on Mondays at the first run (~7 AM ET)."""
-    now = datetime.now(timezone.utc)
-
-    # Only run on Monday (weekday == 0) and during the 11:00 UTC hour (7 AM ET)
-    if now.weekday() == 0 and now.hour == 11:
-        summary = build_weekly_summary()
-        send_email(
-            subject="FCC STA Weekly Summary – D-Fend Solutions",
-            body=summary
-        )
-        print("Weekly summary email sent.")
+    """TEMPORARILY FORCED for testing – revert after test."""
+    summary = build_weekly_summary()
+    sent = send_email(
+        subject="FCC STA Weekly Summary – D-Fend Solutions (TEST)",
+        body=summary
+    )
+    if sent:
+        print("Weekly summary email sent (forced test).")
     else:
-        print("Not the Monday 7 AM ET run – skipping weekly summary.")
+        print("Weekly summary email failed to send.")
+
+# def send_weekly_summary_if_monday():
+#     """Send the weekly summary only on Mondays at the first run (~7 AM ET)."""
+#     now = datetime.now(timezone.utc)
+#
+#     # Only run on Monday (weekday == 0) and during the 11:00 UTC hour (7 AM ET)
+#     if now.weekday() == 0 and now.hour == 11:
+#         summary = build_weekly_summary()
+#         send_email(
+#             subject="FCC STA Weekly Summary – D-Fend Solutions",
+#             body=summary
+#         )
+#         print("Weekly summary email sent.")
+#     else:
+#         print("Not the Monday 7 AM ET run – skipping weekly summary.")
 
 # ============================================================
 # MAIN
