@@ -550,31 +550,22 @@ def build_weekly_summary() -> str:
     return "\n".join(lines)
 
 def send_weekly_summary_if_monday():
-    """TEMPORARILY FORCED for testing – revert after test."""
-    summary = build_weekly_summary()
-    sent = send_email(
-        subject="FCC STA Weekly Summary – D-Fend Solutions (TEST)",
-        body=summary
-    )
-    if sent:
-        print("Weekly summary email sent (forced test).")
-    else:
-        print("Weekly summary email failed to send.")
+    """Send the weekly summary only on Mondays during the morning run (~7 AM ET)."""
+    now = datetime.now(timezone.utc)
 
-# def send_weekly_summary_if_monday():
-#     """Send the weekly summary only on Mondays at the first run (~7 AM ET)."""
-#     now = datetime.now(timezone.utc)
-#
-#     # Only run on Monday (weekday == 0) and during the 11:00 UTC hour (7 AM ET)
-#     if now.weekday() == 0 and now.hour == 11:
-#         summary = build_weekly_summary()
-#         send_email(
-#             subject="FCC STA Weekly Summary – D-Fend Solutions",
-#             body=summary
-#         )
-#         print("Weekly summary email sent.")
-#     else:
-#         print("Not the Monday 7 AM ET run – skipping weekly summary.")
+    # Monday + roughly the 7 AM ET window (11 or 12 UTC to allow for slight delays)
+    if now.weekday() == 0 and now.hour in (11, 12):
+        summary = build_weekly_summary()
+        sent = send_email(
+            subject="FCC STA Weekly Summary – D-Fend Solutions",
+            body=summary
+        )
+        if sent:
+            print("Weekly summary email sent.")
+        else:
+            print("Weekly summary email failed to send.")
+    else:
+        print(f"Not the Monday morning run (weekday={now.weekday()}, hour={now.hour}) – skipping weekly summary.")
 
 # ============================================================
 # MAIN
