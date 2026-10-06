@@ -3,7 +3,7 @@ name: FCC STA Checker
 on:
   schedule:
     # Runs once per day at 12:00 PM Eastern (EDT = UTC-4 → 16:00 UTC)
-    - cron: '0 16 * * *'
+    - cron: '0 10 * * *'
   workflow_dispatch:
 
 jobs:
