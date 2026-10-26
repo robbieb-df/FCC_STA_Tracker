@@ -19,10 +19,19 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Download previous databases
+      - name: Download previous databases (new name)
         uses: dawidd6/action-download-artifact@v6
         with:
           name: sta-tracker-dbs
+          path: .
+          search_artifacts: true
+          if_no_artifact_found: warn
+        continue-on-error: true
+
+      - name: Download legacy database (fallback)
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          name: sta-tracker-db
           path: .
           search_artifacts: true
           if_no_artifact_found: warn
