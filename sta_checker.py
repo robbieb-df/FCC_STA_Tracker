@@ -1,6 +1,8 @@
 """
-FCC STA Tracker - Starter Script (v2)
-Monitors Special Temporary Authorization applications for "D-Fend Solutions"
+FCC STA Tracker
+Monitors Special Temporary Authorization applications for:
+  - D-Fend Solutions
+  - Sentrycs
 """
 
 import sqlite3
@@ -8,22 +10,41 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import json
 from playwright.sync_api import sync_playwright
+import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import re
+from bs4 import BeautifulSoup
+
 
 # ============================================================
-# EMAIL CONFIG
+# CONFIG
 # ============================================================
-import os
-APPLICANT_NAME = "D-Fend Solutions"
-DB_PATH = Path("sta_tracker.db")
+
+APPLICANTS = [
+    "D-Fend Solutions",
+    "Sentrycs",
+]
+
 SEARCH_URL = "https://apps.fcc.gov/oetcf/els/reports/GenericSearch.cfm"
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS", "")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
 
-# Comma-separated list from the secret, or fallback
-_recipients_raw = os.getenv("ALERT_RECIPIENTS", "")
-ALERT_RECIPIENTS = [r.strip() for r in _recipients_raw.split(",") if r.strip()]
+# Per-applicant recipient lists (comma-separated in the secrets)
+_recipients_dfend = os.getenv("ALERT_RECIPIENTS_DFEND", "")
+_recipients_sentrycs = os.getenv("ALERT_RECIPIENTS_SENTRYCS", "")
+
+RECIPIENTS = {
+    "D-Fend Solutions": [r.strip() for r in _recipients_dfend.split(",") if r.strip()],
+    "Sentrycs": [r.strip() for r in _recipients_sentrycs.split(",") if r.strip()],
+}
+
+# These two globals are set per-applicant inside process_applicant()
+APPLICANT_NAME = "D-Fend Solutions"
+DB_PATH = Path("sta_tracker.db")
 
 
 # ============================================================
@@ -36,44 +57,34 @@ def init_db():
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS applications (
-            file_number     TEXT PRIMARY KEY,
-            applicant       TEXT,
-            status          TEXT,
-            call_sign       TEXT,
-            receipt_date    TEXT,
-            grant_date      TEXT,
-            sta_start_date  TEXT,
-            sta_expiration_date TEXT,
-            city            TEXT,
-            state           TEXT,
-            application_seq TEXT,
-            last_seen       TEXT,
-            first_seen      TEXT,
-            raw_data        TEXT
+            file_number           TEXT PRIMARY KEY,
+            applicant             TEXT,
+            status                TEXT,
+            call_sign             TEXT,
+            receipt_date          TEXT,
+            grant_date            TEXT,
+            sta_start_date        TEXT,
+            sta_expiration_date   TEXT,
+            city                  TEXT,
+            state                 TEXT,
+            application_seq       TEXT,
+            purpose_of_operation  TEXT,
+            last_seen             TEXT,
+            first_seen            TEXT,
+            raw_data              TEXT
         )
     """)
 
-    # Add columns if the table already exists from earlier runs
-    try:
-        cur.execute("ALTER TABLE applications ADD COLUMN city TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE applications ADD COLUMN state TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE applications ADD COLUMN application_seq TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE applications ADD COLUMN sta_start_date TEXT")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE applications ADD COLUMN sta_expiration_date TEXT")
-    except sqlite3.OperationalError:
-        pass
+    # Safely add any missing columns (works even if the table already exists)
+    for col in (
+        "city", "state", "application_seq",
+        "sta_start_date", "sta_expiration_date",
+        "purpose_of_operation"
+    ):
+        try:
+            cur.execute(f"ALTER TABLE applications ADD COLUMN {col} TEXT")
+        except sqlite3.OperationalError:
+            pass
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS run_log (
@@ -92,7 +103,6 @@ def init_db():
 def load_previous_state() -> dict:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    # Order by receipt_date descending (newest first)
     rows = conn.execute("""
             SELECT * FROM applications
             ORDER BY 
@@ -123,9 +133,9 @@ def save_state(records: list[dict]):
             INSERT INTO applications (
                 file_number, applicant, status, call_sign,
                 receipt_date, grant_date, sta_start_date, sta_expiration_date,
-                city, state, application_seq,
+                city, state, application_seq, purpose_of_operation,
                 last_seen, first_seen, raw_data
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(file_number) DO UPDATE SET
                 status = excluded.status,
                 call_sign = excluded.call_sign,
@@ -142,6 +152,11 @@ def save_state(records: list[dict]):
                              ELSE applications.state
                         END,
                 application_seq = excluded.application_seq,
+                purpose_of_operation = CASE
+                    WHEN excluded.purpose_of_operation IS NOT NULL AND excluded.purpose_of_operation <> ''
+                    THEN excluded.purpose_of_operation
+                    ELSE applications.purpose_of_operation
+                END,
                 last_seen = excluded.last_seen,
                 raw_data = excluded.raw_data
         """, (
@@ -156,6 +171,7 @@ def save_state(records: list[dict]):
             rec.get("city", ""),
             rec.get("state", ""),
             rec.get("application_seq", ""),
+            rec.get("purpose_of_operation", ""),
             now,
             first_seen,
             json.dumps(rec),
@@ -164,6 +180,7 @@ def save_state(records: list[dict]):
     conn.commit()
     conn.close()
     print(f"Saved {len(records)} records.")
+
 
 # ============================================================
 # FETCH WITH PLAYWRIGHT
@@ -185,27 +202,20 @@ def fetch_stas(applicant: str = APPLICANT_NAME) -> list[dict]:
             page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=60000)
             print("   Page loaded.")
 
-            # Fill Applicant Name
             page.fill('input[name="name_licensee"]', applicant)
 
-            # Ensure Special Temporary Authority is checked
             sta = page.locator('input[name="special_temporary_authority"]')
             if not sta.is_checked():
                 sta.check()
 
-            # ----- Status filters -----
-            # Uncheck "Include all statuses"
             all_status = page.locator('input[name="all"]')
             if all_status.is_checked():
                 all_status.uncheck()
 
-            # Check only the statuses we want
             page.locator('input[name="granted"]').check()
             page.locator('input[name="pending"]').check()
             page.locator('input[name="dismissed"]').check()
-            # Leave "expired" unchecked
 
-            # ----- Records per page -----
             page.fill('input[name="show_records"]', "100")
 
             print("2. Submitting search (Granted + Pending + Dismissed, 100 records)...")
@@ -217,21 +227,13 @@ def fetch_stas(applicant: str = APPLICANT_NAME) -> list[dict]:
             Path("fcc_last_result.html").write_text(html, encoding="utf-8")
             print("   Saved fcc_last_result.html")
 
-            # ---------- Improved parsing ----------
-            from bs4 import BeautifulSoup
-            import re
-
             soup = BeautifulSoup(html, "html.parser")
-
-            # Find all data rows
             rows = soup.select("tr.rowprimary, tr.rowalternate")
             print(f"3. Found {len(rows)} data rows.")
 
             for row in rows:
-                # Get all text cells
                 cells = [td.get_text(" ", strip=True) for td in row.find_all("td")]
 
-                # Look for a File Number pattern like 1504-EX-ST-2026
                 file_number = None
                 for cell in cells:
                     match = re.search(r"\d{4}-EX-[A-Z]{2}-\d{4}", cell)
@@ -239,7 +241,6 @@ def fetch_stas(applicant: str = APPLICANT_NAME) -> list[dict]:
                         file_number = match.group(0)
                         break
 
-                # Also try to pull it from links if not found in text
                 if not file_number:
                     for a in row.find_all("a", href=True):
                         match = re.search(r"id_file_num=([^&]+)", a["href"])
@@ -250,7 +251,6 @@ def fetch_stas(applicant: str = APPLICANT_NAME) -> list[dict]:
                 if not file_number:
                     continue
 
-                # Status is usually a short word near the end
                 status = "Unknown"
                 for cell in reversed(cells):
                     cell_lower = cell.lower()
@@ -265,12 +265,10 @@ def fetch_stas(applicant: str = APPLICANT_NAME) -> list[dict]:
                         status = "Granted"
                         break
 
-                # Receipt / Status date – look for MM/DD/YYYY
                 dates = re.findall(r"\d{2}/\d{2}/\d{4}", " ".join(cells))
                 receipt_date = dates[0] if dates else ""
                 status_date = dates[-1] if len(dates) > 1 else (dates[0] if dates else "")
 
-                # Extract application_seq from the "Initial" or "Current" link
                 application_seq = ""
                 for a in row.find_all("a", href=True):
                     match = re.search(r"application_seq=(\d+)", a["href"])
@@ -290,7 +288,8 @@ def fetch_stas(applicant: str = APPLICANT_NAME) -> list[dict]:
                     "city": "",
                     "state": "",
                     "application_seq": application_seq,
-                    "raw_row": " | ".join(cells[:12]),  # keep a sample for debugging
+                    "purpose_of_operation": "",
+                    "raw_row": " | ".join(cells[:12]),
                 }
                 records.append(record)
 
@@ -299,10 +298,7 @@ def fetch_stas(applicant: str = APPLICANT_NAME) -> list[dict]:
         except Exception as e:
             print(f"Error during browser automation: {e}")
             try:
-                Path("fcc_error_page.html").write_text(
-                    page.content(),
-                    encoding="utf-8"
-                )
+                Path("fcc_error_page.html").write_text(page.content(), encoding="utf-8")
             except Exception:
                 pass
             raise
@@ -311,17 +307,18 @@ def fetch_stas(applicant: str = APPLICANT_NAME) -> list[dict]:
 
     return records
 
+
 def fetch_sta_details(application_seq: str) -> dict:
     """
-    Fetch City, State, Operation Start Date, and Operation End Date
-    from the STA detail page in a single browser session.
-    Returns a dict with keys: city, state, sta_start_date, sta_expiration_date
+    Fetch City, State, Operation Start/End Dates, and Purpose of Operation
+    from the STA detail page.
     """
     result = {
         "city": "",
         "state": "",
         "sta_start_date": "",
         "sta_expiration_date": "",
+        "purpose_of_operation": "",
     }
 
     if not application_seq:
@@ -333,7 +330,6 @@ def fetch_sta_details(application_seq: str) -> dict:
     )
 
     try:
-        import re
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
@@ -378,6 +374,18 @@ def fetch_sta_details(application_seq: str) -> dict:
                         elif "operation end date" in label:
                             result["sta_expiration_date"] = value
 
+            # ----- Purpose of Operation -----
+            fieldset_purpose = page.locator('fieldset[title="Purpose of Operation"]')
+            if fieldset_purpose.count() > 0:
+                raw = fieldset_purpose.inner_text()
+                purpose = re.sub(
+                    r"Purpose of Operation\s*|Please explain the purpose of operation:\s*",
+                    "",
+                    raw,
+                    flags=re.IGNORECASE
+                ).strip()
+                result["purpose_of_operation"] = purpose
+
             browser.close()
 
     except Exception as e:
@@ -385,13 +393,13 @@ def fetch_sta_details(application_seq: str) -> dict:
 
     return result
 
+
 # ============================================================
-# CHANGE DETECTION + EMAIL EMPLOYEES
+# CHANGE DETECTION + EMAIL
 # ============================================================
 
 def detect_changes(old: dict, new_records: list[dict]) -> list[tuple]:
-    """
-    Detect new applications and Pending → Granted transitions. """
+    """Detect new applications and Pending → Granted transitions."""
     alerts = []
     new_dict = {r["file_number"]: r for r in new_records if r.get("file_number")}
 
@@ -406,13 +414,10 @@ def detect_changes(old: dict, new_records: list[dict]) -> list[tuple]:
 
     return alerts
 
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 def send_email(subject: str, body: str, recipients: list[str] | None = None) -> bool:
     if recipients is None:
-        recipients = ALERT_RECIPIENTS
+        recipients = []
 
     if not recipients:
         print("No recipients configured – email not sent.")
@@ -444,6 +449,7 @@ def send_email(subject: str, body: str, recipients: list[str] | None = None) -> 
         print(f"Failed to send email: {e}")
         return False
 
+
 def parse_date(date_str: str):
     """Parse MM/DD/YYYY → datetime object. Returns None if invalid."""
     if not date_str or date_str.strip() in ("", "N/A"):
@@ -453,8 +459,9 @@ def parse_date(date_str: str):
     except ValueError:
         return None
 
+
 def build_weekly_summary() -> str:
-    """Build the weekly summary email body from the database."""
+    """Build the weekly summary email body from the database (D-Fend only)."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     rows = conn.execute("SELECT * FROM applications").fetchall()
@@ -476,88 +483,72 @@ def build_weekly_summary() -> str:
         state = row["state"] or "N/A"
         receipt = parse_date(row["receipt_date"])
         grant = parse_date(row["grant_date"])
-        start = parse_date(row["sta_start_date"])
         expiration = parse_date(row["sta_expiration_date"])
 
         location = f"{city}, {state}"
 
-        # 1. Submitted last week
         if receipt and one_week_ago <= receipt.date() <= today:
             submitted_last_week.append(
                 f"  • {file_number} submitted on {row['receipt_date']} for {location}"
             )
 
-        # 2. Still Pending
         if status.lower() == "pending" and receipt:
             days_pending = (today - receipt.date()).days
             still_pending.append(
                 (days_pending, f"  • {file_number} submitted on {row['receipt_date']} for {location} ({days_pending} days since submission)")
             )
 
-        # 3. Granted last week
         if grant and one_week_ago <= grant.date() <= today:
             days_to_grant = (grant.date() - receipt.date()).days if receipt else "?"
             granted_last_week.append(
                 f"  • {file_number} granted on {row['grant_date']}, {days_to_grant} days after submission, for {location} beginning on {row['sta_start_date']}"
             )
 
-        # 4. Expiring in the next 3 months
         if expiration and today <= expiration.date() <= three_months_from_now:
             days_until = (expiration.date() - today).days
             expiring_soon.append(
                 (days_until, f"  • {file_number} expiring on {row['sta_expiration_date']} for {location} ({days_until} days until expiration)")
             )
 
-    # Sort pending by oldest first, expiring by soonest first
     still_pending.sort(key=lambda x: x[0], reverse=True)
     expiring_soon.sort(key=lambda x: x[0])
 
-    # Build the email body
     lines = []
     lines.append("FCC STA Weekly Summary – D-Fend Solutions")
     lines.append("=" * 50)
     lines.append("")
 
     lines.append(f"STA applications submitted last week: {len(submitted_last_week)}")
-    if submitted_last_week:
-        lines.extend(submitted_last_week)
-    else:
-        lines.append("  (none)")
+    lines.extend(submitted_last_week if submitted_last_week else ["  (none)"])
     lines.append("")
 
     lines.append(f"STA applications still pending: {len(still_pending)}")
-    if still_pending:
-        lines.extend([item[1] for item in still_pending])
-    else:
-        lines.append("  (none)")
+    lines.extend([item[1] for item in still_pending] if still_pending else ["  (none)"])
     lines.append("")
 
     lines.append(f"STA licenses granted last week: {len(granted_last_week)}")
-    if granted_last_week:
-        lines.extend(granted_last_week)
-    else:
-        lines.append("  (none)")
+    lines.extend(granted_last_week if granted_last_week else ["  (none)"])
     lines.append("")
 
     lines.append(f"STA licenses expiring in the next 3 months: {len(expiring_soon)}")
-    if expiring_soon:
-        lines.extend([item[1] for item in expiring_soon])
-    else:
-        lines.append("  (none)")
+    lines.extend([item[1] for item in expiring_soon] if expiring_soon else ["  (none)"])
     lines.append("")
 
     lines.append(f"Report generated: {today.strftime('%Y-%m-%d')}")
     return "\n".join(lines)
 
+
 def send_weekly_summary_if_monday():
-    """Send the weekly summary only on Mondays."""
+    """Send the weekly summary only on Mondays (D-Fend Solutions only)."""
     now = datetime.now(timezone.utc)
 
     if now.weekday() == 0:  # Monday
         summary = build_weekly_summary()
+        recipients = RECIPIENTS.get("D-Fend Solutions", [])
         sent = send_email(
             subject="FCC STA Weekly Summary – D-Fend Solutions",
-            body=summary
+            body=summary,
+            recipients=recipients,
         )
         if sent:
             print("Weekly summary email sent.")
@@ -566,27 +557,40 @@ def send_weekly_summary_if_monday():
     else:
         print(f"Not Monday (weekday={now.weekday()}) – skipping weekly summary.")
 
+
 # ============================================================
-# MAIN
+# MAIN PROCESSING
 # ============================================================
 
-def main():
-    print(f"\n=== FCC STA Checker started at {datetime.now()} ===\n")
+def process_applicant(applicant: str):
+    global APPLICANT_NAME, DB_PATH
+
+    # Keep original DB name for D-Fend so history is preserved
+    if applicant == "D-Fend Solutions":
+        DB_PATH = Path("sta_tracker.db")
+    else:
+        safe = applicant.lower().replace(" ", "_").replace("-", "_")
+        DB_PATH = Path(f"sta_tracker_{safe}.db")
+
+    APPLICANT_NAME = applicant
+
+    print(f"\n---------- Processing: {applicant} ----------")
+    print(f"Using database: {DB_PATH}")
+
     init_db()
 
     previous = load_previous_state()
     print(f"Loaded {len(previous)} previously known applications.")
 
-    current_records = fetch_stas()
+    current_records = fetch_stas(applicant)
 
-    # Enrich records with City/State
+    # Enrich records with details
     for rec in current_records:
         status_lower = (rec.get("status") or "").lower()
         app_seq = rec.get("application_seq")
 
         if not app_seq:
             continue
-
         if status_lower not in ("pending", "granted", "denied/dismissed", "dismissed"):
             continue
 
@@ -594,8 +598,9 @@ def main():
 
         needs_location = not existing.get("city") and not existing.get("state")
         needs_dates = not existing.get("sta_start_date") and not existing.get("sta_expiration_date")
+        needs_purpose = not existing.get("purpose_of_operation")
 
-        if needs_location or needs_dates:
+        if needs_location or needs_dates or needs_purpose:
             print(f"   Fetching details for seq={app_seq}...")
             details = fetch_sta_details(app_seq)
 
@@ -603,23 +608,24 @@ def main():
             rec["state"] = details["state"] or existing.get("state", "")
             rec["sta_start_date"] = details["sta_start_date"] or existing.get("sta_start_date", "")
             rec["sta_expiration_date"] = details["sta_expiration_date"] or existing.get("sta_expiration_date", "")
+            rec["purpose_of_operation"] = details["purpose_of_operation"] or existing.get("purpose_of_operation", "")
         else:
-            # Re-use previously stored values
             rec["city"] = existing.get("city", "")
             rec["state"] = existing.get("state", "")
             rec["sta_start_date"] = existing.get("sta_start_date", "")
             rec["sta_expiration_date"] = existing.get("sta_expiration_date", "")
+            rec["purpose_of_operation"] = existing.get("purpose_of_operation", "")
 
-        # Keep the original detailed print format
         print(
             f"   File Number: '{rec['file_number']}' | "
             f"Location: '{rec['city']}', '{rec['state']}' | "
             f"Submitted: '{rec['receipt_date']}' | "
             f"Status: '{rec['status']}' | "
-            f"Granted: '{rec['grant_date']}' | "
             f"Start: '{rec['sta_start_date']}' | "
             f"End: '{rec['sta_expiration_date']}'"
         )
+        if rec.get("purpose_of_operation"):
+            print(f"      Purpose: {rec['purpose_of_operation'][:120]}...")
 
     if not current_records:
         print("No records returned.")
@@ -633,6 +639,8 @@ def main():
         return
 
     alerts = detect_changes(previous, current_records)
+    recipients = RECIPIENTS.get(applicant, [])
+
     for event_type, rec in alerts:
         file_number = rec.get("file_number", "Unknown")
         status = rec.get("status", "Unknown")
@@ -641,47 +649,62 @@ def main():
         receipt = rec.get("receipt_date") or "N/A"
         grant_date = rec.get("grant_date") or "N/A"
         app_seq = rec.get("application_seq") or ""
+        purpose = rec.get("purpose_of_operation") or "N/A"
 
-        # Build direct link to the STA detail page
         if app_seq:
-            detail_link = f"https://apps.fcc.gov/oetcf/els/reports/STA_Print.cfm?mode=initial&application_seq={app_seq}&RequestTimeout=1000"
+            detail_link = (
+                f"https://apps.fcc.gov/oetcf/els/reports/STA_Print.cfm"
+                f"?mode=initial&application_seq={app_seq}&RequestTimeout=1000"
+            )
         else:
             detail_link = "https://apps.fcc.gov/oetcf/els/reports/GenericSearch.cfm"
+
+        # Alert policy:
+        #   D-Fend Solutions → new + granted
+        #   Sentrycs        → new only
+        if applicant != "D-Fend Solutions" and event_type != "new":
+            continue
 
         if event_type == "granted":
             subject = f"STA GRANTED: {file_number}"
             body = f"""A Special Temporary Authorization has been GRANTED.
 
-    File Number: {file_number}
-    Status: {status}
-    Applicant: {rec.get('applicant', 'D-Fend Solutions')}
-    City: {city}
-    State: {state}
-    Receipt Date: {receipt}
-    Grant Date: {grant_date}
-    Start Date: {rec['sta_start_date']}
-    Expiration Date: {rec['sta_expiration_date']}
+File Number: {file_number}
+Status: {status}
+Applicant: {applicant}
+City: {city}
+State: {state}
+Receipt Date: {receipt}
+Grant Date: {grant_date}
+Start Date: {rec.get('sta_start_date', '')}
+Expiration Date: {rec.get('sta_expiration_date', '')}
 
-    Direct link to STA details:
-    {detail_link}
-    """
-            send_email(subject, body)
+Purpose of Operation:
+{purpose}
+
+Direct link to STA details:
+{detail_link}
+"""
+            send_email(subject, body, recipients=recipients)
 
         elif event_type == "new":
             subject = f"New STA filed: {file_number}"
             body = f"""A new STA application has been detected.
 
-    File Number: {file_number}
-    Status: {status}
-    Applicant: {rec.get('applicant', 'D-Fend Solutions')}
-    City: {city}
-    State: {state}
-    Receipt Date: {receipt}
+File Number: {file_number}
+Status: {status}
+Applicant: {applicant}
+City: {city}
+State: {state}
+Receipt Date: {receipt}
 
-    Direct link to STA details:
-    {detail_link}
-    """
-            send_email(subject, body)
+Purpose of Operation:
+{purpose}
+
+Direct link to STA details:
+{detail_link}
+"""
+            send_email(subject, body, recipients=recipients)
 
     save_state(current_records)
 
@@ -693,10 +716,21 @@ def main():
     conn.commit()
     conn.close()
 
-    # Weekly summary (only on Mondays)
-    send_weekly_summary_if_monday()
+    # Weekly summary only for D-Fend Solutions (and only on Mondays)
+    if applicant == "D-Fend Solutions":
+        send_weekly_summary_if_monday()
 
-    print(f"\n=== Finished. {len(alerts)} alert(s). ===\n")
+    print(f"Finished {applicant}: {len(alerts)} alert(s).")
+
+
+def main():
+    print(f"\n=== FCC STA Checker started at {datetime.now()} ===\n")
+
+    for applicant in APPLICANTS:
+        process_applicant(applicant)
+
+    print(f"\n=== All applicants finished ===\n")
+
 
 if __name__ == "__main__":
     main()
