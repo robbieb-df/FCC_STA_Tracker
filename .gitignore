@@ -10,5 +10,6 @@ venv/
 
 # Project files we don't want in Git
 sta_tracker.db
+sta_tracker_*.db
 fcc_*.html
 *.log
