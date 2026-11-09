@@ -600,6 +600,15 @@ def process_applicant(applicant: str):
     previous = load_previous_state()
     print(f"Loaded {len(previous)} previously known applications.")
 
+    # Temporary debug – only for D-Fend
+    print("\n--- DEBUG: Checking specific problem records ---")
+    for fn in ["2283-EX-ST-2026", "0200-EX-CM-2026"]:
+        if fn in previous:
+            print(f"  {fn} is in DB → status = '{previous[fn].get('status')}'")
+        else:
+            print(f"  {fn} is NOT in the loaded database")
+    print("--- End debug ---\n")
+
     current_records = fetch_stas(applicant)
 
     # Enrich records with details
