@@ -421,13 +421,11 @@ def detect_changes(old: dict, new_records: list[dict]) -> list[tuple]:
 
     for fn, rec in new_dict.items():
         if fn not in old:
-            print(f"  ALERT TRIGGERED: new for {fn} | old_status='(not in DB)' → new_status='{rec.get('status')}'")
             alerts.append(("new", rec))
         else:
             old_status = (old[fn].get("status") or "").lower()
             new_status = (rec.get("status") or "").lower()
             if old_status == "pending" and new_status == "granted":
-                print(f"  ALERT TRIGGERED: granted for {fn} | old_status='{old[fn].get('status')}' → new_status='{rec.get('status')}'")
                 alerts.append(("granted", rec))
 
     return alerts
@@ -600,15 +598,6 @@ def process_applicant(applicant: str):
     previous = load_previous_state()
     print(f"Loaded {len(previous)} previously known applications.")
 
-    # Temporary debug – only for D-Fend
-    print("\n--- DEBUG: Checking specific problem records ---")
-    for fn in ["2283-EX-ST-2026", "0200-EX-CM-2026"]:
-        if fn in previous:
-            print(f"  {fn} is in DB → status = '{previous[fn].get('status')}'")
-        else:
-            print(f"  {fn} is NOT in the loaded database")
-    print("--- End debug ---\n")
-
     current_records = fetch_stas(applicant)
 
     # Enrich records with details
@@ -664,15 +653,6 @@ def process_applicant(applicant: str):
         conn.commit()
         conn.close()
         return
-
-    # Temporary debug – remove after we find the problem
-    print("\n--- DEBUG: Checking specific problem records ---")
-    for fn in ["2283-EX-ST-2026", "0200-EX-CM-2026"]:
-        if fn in previous:
-            print(f"  {fn} is in DB → status = '{previous[fn].get('status')}'")
-        else:
-            print(f"  {fn} is NOT in the loaded database")
-    print("--- End debug ---\n")
 
     alerts = detect_changes(previous, current_records)
     recipients = RECIPIENTS.get(applicant, [])
@@ -745,22 +725,10 @@ Direct link to STA details:
     save_state(current_records)
 
     conn = sqlite3.connect(DB_PATH)
-    # Temporary post-save verification
-    conn = sqlite3.connect(DB_PATH)
-    print("\n--- POST-SAVE CHECK ---")
-    for fn in ["2283-EX-ST-2026", "0200-EX-CM-2026"]:
-        row = conn.execute(
-            "SELECT status FROM applications WHERE file_number = ?", (fn,)
-        ).fetchone()
-        if row:
-            print(f"  {fn} → status = '{row[0]}'")
-        else:
-            print(f"  {fn} → NOT FOUND after save")
-    print("--- END POST-SAVE CHECK ---\n")
-    # conn.execute(
-    #     "INSERT INTO run_log (run_time, records_found, notes) VALUES (?, ?, ?)",
-    #     (datetime.now(timezone.utc).isoformat(), len(current_records), f"{len(alerts)} alerts")
-    # )
+    conn.execute(
+        "INSERT INTO run_log (run_time, records_found, notes) VALUES (?, ?, ?)",
+        (datetime.now(timezone.utc).isoformat(), len(current_records), f"{len(alerts)} alerts")
+    )
     conn.commit()
     conn.close()
 
