@@ -120,14 +120,18 @@ def save_state(records: list[dict]):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
+    saved_count = 0
+    failed = []
+
     for rec in records:
         file_number = rec.get("file_number")
         if not file_number:
             continue
 
-        cur.execute("SELECT first_seen FROM applications WHERE file_number = ?", (file_number,))
-        existing = cur.fetchone()
-        first_seen = existing[0] if existing else now
+        try:
+            cur.execute("SELECT first_seen FROM applications WHERE file_number = ?", (file_number,))
+            existing = cur.fetchone()
+            first_seen = existing[0] if existing else now
 
         cur.execute("""
             INSERT INTO applications (
@@ -176,10 +180,21 @@ def save_state(records: list[dict]):
             first_seen,
             json.dumps(rec),
         ))
+        saved_count += 1
+
+    except Exception as e:
+    failed.append((file_number, str(e)))
+    print(f"  ✗ FAILED to save {file_number}: {e}")
+
 
     conn.commit()
     conn.close()
-    print(f"Saved {len(records)} records.")
+
+    print(f"Saved {saved_count} records.")
+    if failed:
+        print(f"WARNING: {len(failed)} records failed to save:")
+        for fn, err in failed:
+            print(f"   {fn}: {err}")
 
 
 # ============================================================
