@@ -133,59 +133,58 @@ def save_state(records: list[dict]):
             existing = cur.fetchone()
             first_seen = existing[0] if existing else now
 
-        cur.execute("""
-            INSERT INTO applications (
-                file_number, applicant, status, call_sign,
-                receipt_date, grant_date, sta_start_date, sta_expiration_date,
-                city, state, application_seq, purpose_of_operation,
-                last_seen, first_seen, raw_data
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(file_number) DO UPDATE SET
-                status = excluded.status,
-                call_sign = excluded.call_sign,
-                receipt_date = excluded.receipt_date,
-                grant_date = excluded.grant_date,
-                sta_start_date = excluded.sta_start_date,
-                sta_expiration_date = excluded.sta_expiration_date,
-                city = CASE WHEN excluded.city IS NOT NULL AND excluded.city <> ''
+            cur.execute("""
+                INSERT INTO applications (
+                    file_number, applicant, status, call_sign,
+                    receipt_date, grant_date, sta_start_date, sta_expiration_date,
+                    city, state, application_seq, purpose_of_operation,
+                    last_seen, first_seen, raw_data
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(file_number) DO UPDATE SET
+                    status = excluded.status,
+                    call_sign = excluded.call_sign,
+                    receipt_date = excluded.receipt_date,
+                    grant_date = excluded.grant_date,
+                    sta_start_date = excluded.sta_start_date,
+                    sta_expiration_date = excluded.sta_expiration_date,
+                    city = CASE WHEN excluded.city IS NOT NULL AND excluded.city <> ''
                             THEN excluded.city
                             ELSE applications.city
                         END,
-                state = CASE WHEN excluded.state IS NOT NULL AND excluded.state <> ''
+                    state = CASE WHEN excluded.state IS NOT NULL AND excluded.state <> ''
                              THEN excluded.state
                              ELSE applications.state
                         END,
-                application_seq = excluded.application_seq,
-                purpose_of_operation = CASE
-                    WHEN excluded.purpose_of_operation IS NOT NULL AND excluded.purpose_of_operation <> ''
-                    THEN excluded.purpose_of_operation
-                    ELSE applications.purpose_of_operation
-                END,
-                last_seen = excluded.last_seen,
-                raw_data = excluded.raw_data
-        """, (
-            file_number,
-            rec.get("applicant", APPLICANT_NAME),
-            rec.get("status", "Unknown"),
-            rec.get("call_sign", ""),
-            rec.get("receipt_date", ""),
-            rec.get("grant_date", ""),
-            rec.get("sta_start_date", ""),
-            rec.get("sta_expiration_date", ""),
-            rec.get("city", ""),
-            rec.get("state", ""),
-            rec.get("application_seq", ""),
-            rec.get("purpose_of_operation", ""),
-            now,
-            first_seen,
-            json.dumps(rec),
-        ))
-        saved_count += 1
+                    application_seq = excluded.application_seq,
+                    purpose_of_operation = CASE
+                        WHEN excluded.purpose_of_operation IS NOT NULL AND excluded.purpose_of_operation <> ''
+                        THEN excluded.purpose_of_operation
+                        ELSE applications.purpose_of_operation
+                    END,
+                    last_seen = excluded.last_seen,
+                    raw_data = excluded.raw_data
+            """, (
+                file_number,
+                rec.get("applicant", APPLICANT_NAME),
+                rec.get("status", "Unknown"),
+                rec.get("call_sign", ""),
+                rec.get("receipt_date", ""),
+                rec.get("grant_date", ""),
+                rec.get("sta_start_date", ""),
+                rec.get("sta_expiration_date", ""),
+                rec.get("city", ""),
+                rec.get("state", ""),
+                rec.get("application_seq", ""),
+                rec.get("purpose_of_operation", ""),
+                now,
+                first_seen,
+                json.dumps(rec),
+            ))
+            saved_count += 1
 
-    except Exception as e:
-    failed.append((file_number, str(e)))
-    print(f"  ✗ FAILED to save {file_number}: {e}")
-
+        except Exception as e:
+            failed.append((file_number, str(e)))
+            print(f"  ✗ FAILED to save {file_number}: {e}")
 
     conn.commit()
     conn.close()
