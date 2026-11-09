@@ -399,17 +399,21 @@ def fetch_sta_details(application_seq: str) -> dict:
 # ============================================================
 
 def detect_changes(old: dict, new_records: list[dict]) -> list[tuple]:
-    """Detect new applications and Pending → Granted transitions."""
+    """
+    Detect new applications and Pending → Granted transitions.
+    """
     alerts = []
     new_dict = {r["file_number"]: r for r in new_records if r.get("file_number")}
 
     for fn, rec in new_dict.items():
         if fn not in old:
+            print(f"  ALERT TRIGGERED: new for {fn} | old_status='(not in DB)' → new_status='{rec.get('status')}'")
             alerts.append(("new", rec))
         else:
             old_status = (old[fn].get("status") or "").lower()
             new_status = (rec.get("status") or "").lower()
             if old_status == "pending" and new_status == "granted":
+                print(f"  ALERT TRIGGERED: granted for {fn} | old_status='{old[fn].get('status')}' → new_status='{rec.get('status')}'")
                 alerts.append(("granted", rec))
 
     return alerts
@@ -637,6 +641,15 @@ def process_applicant(applicant: str):
         conn.commit()
         conn.close()
         return
+
+    # Temporary debug – remove after we find the problem
+    print("\n--- DEBUG: Checking specific problem records ---")
+    for fn in ["2283-EX-ST-2026", "0200-EX-CM-2026"]:
+        if fn in previous:
+            print(f"  {fn} is in DB → status = '{previous[fn].get('status')}'")
+        else:
+            print(f"  {fn} is NOT in the loaded database")
+    print("--- End debug ---\n")
 
     alerts = detect_changes(previous, current_records)
     recipients = RECIPIENTS.get(applicant, [])
