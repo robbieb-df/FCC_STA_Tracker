@@ -745,10 +745,22 @@ Direct link to STA details:
     save_state(current_records)
 
     conn = sqlite3.connect(DB_PATH)
-    conn.execute(
-        "INSERT INTO run_log (run_time, records_found, notes) VALUES (?, ?, ?)",
-        (datetime.now(timezone.utc).isoformat(), len(current_records), f"{len(alerts)} alerts")
-    )
+    # Temporary post-save verification
+    conn = sqlite3.connect(DB_PATH)
+    print("\n--- POST-SAVE CHECK ---")
+    for fn in ["2283-EX-ST-2026", "0200-EX-CM-2026"]:
+        row = conn.execute(
+            "SELECT status FROM applications WHERE file_number = ?", (fn,)
+        ).fetchone()
+        if row:
+            print(f"  {fn} → status = '{row[0]}'")
+        else:
+            print(f"  {fn} → NOT FOUND after save")
+    print("--- END POST-SAVE CHECK ---\n")
+    # conn.execute(
+    #     "INSERT INTO run_log (run_time, records_found, notes) VALUES (?, ?, ?)",
+    #     (datetime.now(timezone.utc).isoformat(), len(current_records), f"{len(alerts)} alerts")
+    # )
     conn.commit()
     conn.close()
 
